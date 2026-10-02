@@ -218,6 +218,45 @@ async function fixture(t) {
     } };
 }
 
+test("historical verifier selection uses the fixture clock after wall-clock support expiry", async (t) => {
+  const f = await fixture(t);
+  const expiry = f.registry.events.find(event => event.cohort_id === f.selected.observed_cohort_id &&
+    event.state === "SUPERSEDED").support_until;
+  assert.ok(Date.parse(f.options.asOf) < Date.parse(expiry));
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse(expiry) });
+  f.options.fullFleetCurrent = false;
+  const result = await f.run();
+  assert.deepEqual(result.current_verified.map(row => row.repository_id), [f.selected.repository_id]);
+  assert.equal(result.current_not_evaluated.length, 5);
+  assert.deepEqual(result.recovery_pending, []);
+  assert.equal(f.controllerCalls(), 2);
+});
+
+test("governance references accept before support expiry and reject the exact boundary", async (t) => {
+  const f = await fixture(t);
+  const expiry = f.registry.events.find(event => event.cohort_id === f.selected.observed_cohort_id &&
+    event.state === "SUPERSEDED").support_until;
+  const exceptions = JSON.parse(await readAdmissionBaseFile(EXCEPTIONS_PATH, base));
+  const security = JSON.parse(await readAdmissionBaseFile("governance/code-security-defaults.json", base));
+  const before = new Date(Date.parse(expiry) - 1_000).toISOString().replace(/\.000Z$/u, "Z");
+  validateDocsGovernanceReferences(f.registry, exceptions, f.policy, security, { asOf: before });
+  assert.throws(() => validateDocsGovernanceReferences(f.registry, exceptions, f.policy, security, { asOf: expiry }),
+    /docs-protocol-canary-20260817 rollout source is no longer supported/u);
+});
+
+test("default verifier clock follows wall-clock time even with a historical evidence asOf", async (t) => {
+  const f = await fixture(t);
+  const expiry = f.registry.events.find(event => event.cohort_id === f.selected.observed_cohort_id &&
+    event.state === "SUPERSEDED").support_until;
+  delete f.options.clock;
+  f.options.fullFleetCurrent = false;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse(f.options.asOf) });
+  assert.deepEqual((await f.run()).current_verified.map(row => row.repository_id), [f.selected.repository_id]);
+  t.mock.timers.setTime(Date.parse(expiry));
+  await assert.rejects(f.run(), /platform-private-required-checks-github-free review is due/u);
+  assert.equal(f.controllerCalls(), 2);
+});
+
 test("full imported verifier admits exact TEST selection with independently covered unchanged Token pending", async (t) => {
   const f = await fixture(t); const result = await f.run();
   assert.equal(result.historical_verified.length, 6); assert.equal(result.current_verified.length, 5);
@@ -741,7 +780,7 @@ async function firstBinding(t, generation = 2, schemaVersion = generation === 2 
   const [policySchema, schema, exceptions, security] = await Promise.all(['docs-protocol-policy-v2.schema',
     'docs-qualified-cohorts.schema', 'docs-protocol-exceptions', 'code-security-defaults'].map(read));
   const validate = () => { for (const p of [basePolicy, f.policy]) {
-    validateDocsProtocolPolicy(p, policySchema); validateDocsGovernanceReferences(f.registry, exceptions, p, security);
+    validateDocsProtocolPolicy(p, policySchema); validateDocsGovernanceReferences(f.registry, exceptions, p, security, { asOf: f.options.asOf });
   } };
   validate();
   f.options.getDefaultBranchHead = async repo => f.policy.repositories.find(r => r.repository === repo).observed_default_branch_evidence.revision;
