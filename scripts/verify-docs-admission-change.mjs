@@ -92,7 +92,7 @@ export async function verifyDocsAdmissionChange(paths, overrides = {}) {
   validateDocsProtocolPolicy(policy, policySchema);
   validateDocsProtocolPolicy(basePolicy, policySchema);
   validateDocsProtocolExceptions(exceptions, exceptionsSchema, { asOf: clock().slice(0, 10) });
-  validateDocsGovernanceReferences(registry, exceptions, policy, security);
+  validateDocsGovernanceReferences(registry, exceptions, policy, security, { asOf: clock() });
   if (paths.inventory) {
     const inventory = JSON.parse(await readFile(paths.inventory));
     const [inventorySchema, ledger, actions] = await Promise.all([
