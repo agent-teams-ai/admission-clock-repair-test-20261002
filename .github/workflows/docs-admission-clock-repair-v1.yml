@@ -1,0 +1,150 @@
+name: Trusted Docs Admission Clock Repair V1
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  trusted-admission-clock-repair-v1:
+    name: trusted-admission-clock-repair-v1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            // Central issue #336: independently stage this guard before refreshing PR #327.
+            // Its introduction cannot pass. The owner freezes the final base/head at cutover.
+            // GitHub supplies read-only immutable metadata; no PR source is loaded or executed.
+            const tuple = [
+              {
+                "path": "scripts/docs-admission-change.test.mjs",
+                "status": "modified",
+                "old_blob": "5bf35c665fd64448e00919b794d3d751aadb692d",
+                "old_mode": "100644",
+                "old_type": "blob",
+                "old_bytes": 71021,
+                "old_sha256": "ddbbb8991737c433504db5144bbedc781d59da73fa6261a5e0ca9c43b4a632be",
+                "new_blob": "9a7129d981eebeeea26eaf93cf9b48b80ce9a79d",
+                "new_mode": "100644",
+                "new_type": "blob",
+                "new_bytes": 73387,
+                "new_sha256": "730bd268412db0e1a44c9b6151e59b751aaa906fcbe7a209cf54720a30b2c11d"
+              },
+              {
+                "path": "scripts/verify-docs-admission-change.mjs",
+                "status": "modified",
+                "old_blob": "a8370bbc3ee10f14e2a522fe85ceb49671fcbca4",
+                "old_mode": "100644",
+                "old_type": "blob",
+                "old_bytes": 14694,
+                "old_sha256": "2df78753d5b7608573ea0107bd45752e6f466acd59055163430cc05bd3c9a3b6",
+                "new_blob": "b88a13d5a8932e2bfbb41a6d21aac79f089ff38a",
+                "new_mode": "100644",
+                "new_type": "blob",
+                "new_bytes": 14713,
+                "new_sha256": "64662498c90c3c3ee8baaf984244730cfa34fa56cc643e0be7d34022758246b1"
+              }
+            ];
+            const guardPaths = [
+              ".github/workflows/docs-admission-clock-repair-v1.yml",
+              "scripts/docs-admission-clock-repair-v1.test.mjs"
+            ];
+            const identity = { id: 1402129879, full_name: "agent-teams-ai/admission-clock-repair-test-20261002" };
+            const repo = { owner: "agent-teams-ai", repo: "admission-clock-repair-test-20261002" };
+            const validSha = (sha) => typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha) && !/^0{40}$/u.test(sha);
+            const sameRepo = (value) => value?.id === identity.id && value.full_name === identity.full_name;
+            const demand = (condition, message) => { if (!condition) throw new Error(message); };
+            try {
+              demand(context.eventName === "pull_request_target" &&
+                ["opened", "synchronize", "reopened", "edited", "ready_for_review"].includes(context.payload.action),
+                "Wrong event or action.");
+              demand(context.repo.owner === repo.owner && context.repo.repo === repo.repo &&
+                sameRepo(context.payload.repository) && context.payload.repository.default_branch === "main",
+                "Wrong repository identity or event default branch.");
+              demand(context.payload.number === 1 && context.issue.number === 1, "Only PR #327 is eligible.");
+              const pull = context.payload.pull_request;
+              const snapshot = (value) => {
+                demand(value?.number === 1 && Number.isSafeInteger(value.id) && value.id > 0,
+                  "Only the identified PR #327 is eligible.");
+                demand(value.state === "open" && value.draft === false && value.merged === false,
+                  "PR must be open, unmerged and ready for review.");
+                demand(sameRepo(value.base?.repo) && sameRepo(value.head?.repo), "Missing or foreign PR repository.");
+                demand(value.base.ref === "main" && typeof value.head.ref === "string" && value.head.ref.length > 0,
+                  "PR must target the default branch with an identified head branch.");
+                demand(validSha(value.base.sha) && validSha(value.head.sha) && value.base.sha !== value.head.sha,
+                  "Nonzero distinct exact base/head revisions required.");
+                demand(value.changed_files === 2, "Exactly two changed files required.");
+                return JSON.stringify([value.id, value.number, value.base.ref, value.base.sha, value.head.ref, value.head.sha]);
+              };
+              const frozen = snapshot(pull);
+              demand(context.sha === pull.base.sha && context.ref === "refs/heads/main",
+                "Execution must be bound to the event default-branch base.");
+              const bindPull = async () => {
+                const live = await github.rest.pulls.get({ ...repo, pull_number: 1 });
+                demand(snapshot(live.data) === frozen, "Live PR moved from the event snapshot.");
+              };
+              const bindDefault = async () => {
+                const controller = await github.rest.repos.get(repo);
+                demand(sameRepo(controller.data) && controller.data.default_branch === "main",
+                  "Live repository identity or default branch changed.");
+                const branch = await github.rest.repos.getBranch({ ...repo, branch: "main" });
+                demand(branch.data?.name === "main" && branch.data.commit?.sha === pull.base.sha,
+                  "Live default branch moved or PR base is stale.");
+              };
+              await bindPull();
+              await bindDefault();
+              const changed = await github.paginate(github.rest.pulls.listFiles, { ...repo, pull_number: 1, per_page: 100 });
+              demand(Array.isArray(changed) && changed.length === 2 &&
+                new Set(changed.map((file) => file?.filename)).size === 2 &&
+                changed.every((file) => file && file.previous_filename === undefined &&
+                  tuple.some((item) => file.filename === item.path && file.status === item.status && file.sha === item.new_blob)),
+                "Incomplete, duplicate or ineligible changed-file tuple.");
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                ...repo, basehead: `${pull.base.sha}...${pull.head.sha}`
+              });
+              const compared = comparison.data;
+              demand(compared?.base_commit?.sha === pull.base.sha && compared.merge_base_commit?.sha === pull.base.sha &&
+                compared.status === "ahead" && compared.behind_by === 0 &&
+                Number.isSafeInteger(compared.ahead_by) && compared.ahead_by > 0 && compared.total_commits === compared.ahead_by,
+                "Head must be a nonempty descendant of the exact base.");
+              const authorities = [];
+              for (const [side, revision] of [["old", pull.base.sha], ["new", pull.head.sha]]) {
+                const commit = await github.rest.git.getCommit({ ...repo, commit_sha: revision });
+                demand(commit.data?.sha === revision && validSha(commit.data.tree?.sha), "Immutable commit/tree binding required.");
+                const response = await github.rest.git.getTree({ ...repo, tree_sha: commit.data.tree.sha, recursive: "true" });
+                const tree = response.data;
+                demand(tree?.sha === commit.data.tree.sha && tree.truncated === false && Array.isArray(tree.tree) &&
+                  tree.tree.every((entry) => typeof entry?.path === "string" && entry.path.length > 0 && validSha(entry.sha)) &&
+                  new Set(tree.tree.map((entry) => entry.path)).size === tree.tree.length,
+                  "Complete unambiguous immutable tree required.");
+                const regularEntry = (path) => {
+                  const entries = tree.tree.filter((entry) => entry.path === path);
+                  demand(entries.length === 1 && entries[0].mode === "100644" && entries[0].type === "blob",
+                    "Required path must be a unique regular 100644 blob.");
+                  return entries[0];
+                };
+                for (const item of tuple) {
+                  const entry = regularEntry(item.path);
+                  demand(entry.sha === item[`${side}_blob`] && entry.size === item[`${side}_bytes`],
+                    "Exact reviewed old/new blob and byte tuple required.");
+                }
+                authorities.push(guardPaths.map(regularEntry));
+              }
+              demand(authorities[0].every((entry, index) => entry.sha === authorities[1][index].sha),
+                "Base-owned guard and test must remain unchanged in head.");
+              // Last metadata operations reject PR, repository/default-branch and branch movement.
+              await bindPull();
+              await bindDefault();
+              const tupleIdentity = require("node:crypto").createHash("sha256").update(JSON.stringify(tuple)).digest("hex");
+              core.info(JSON.stringify({
+                guard: "trusted-admission-clock-repair-v1", repository: identity.full_name, issue: 336,
+                pr: 1, base: pull.base.sha, head: pull.head.sha, tuple_identity: `sha256:${tupleIdentity}`, tuple
+              }));
+            } catch (error) {
+              core.setFailed(`Clock repair guard refused: ${error instanceof Error ? error.message : "API or metadata failure"}`);
+            }
