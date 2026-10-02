@@ -148,3 +148,5 @@ jobs:
             } catch (error) {
               core.setFailed(`Clock repair guard refused: ${error instanceof Error ? error.message : "API or metadata failure"}`);
             }
+
+# TEST-only self-modification must not be admitted.
